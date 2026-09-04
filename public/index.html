@@ -1047,6 +1047,376 @@ setInterval(()=>{
     if(!plansView.classList.contains('hidden')) renderPlans();
   }
 }, 2000);
+  <script>
+const API_BASE = '';
+const REFER_L1 = 12;
+const REFER_L2 = 3;
+
+/* =====================================================================
+   LIVE – API calls to Firebase Firestore backend
+   ===================================================================== */
+
+// ----------------- Constants -----------------
+function fmt(n){ return Number(n||0).toLocaleString('en-PK', {maximumFractionDigits:1}); }
+function timestamp(){ return new Date().toLocaleString('en-PK', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'}); }
+
+let currentUsername = null;
+let currentUser = null;
+let currentAdminTab = 'deposits';
+let currentInvestPlan = null;
+let toastTimer = null;
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=> t.classList.remove('show'), 2600);
+}
+function copyText(str){ navigator.clipboard.writeText(str).catch(()=>{}); showToast('Copied: '+str); }
+function copyLink(){
+  const link = 'https://nextytrading.pk/register/'+currentUsername;
+  navigator.clipboard.writeText(link).catch(()=>{});
+  showToast('Referral link copied');
+}
+function toggleSidebar(show){
+  document.getElementById('sidebar').classList.toggle('show', show);
+  document.getElementById('overlay').classList.toggle('show', show);
+}
+
+// ---------- API wrapper ----------
+async function apiCall(endpoint, method='POST', body=null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(API_BASE + endpoint, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Server error');
+  return data;
+}
+
+// ---------- Auth ----------
+function switchAuthTab(tab){
+  document.getElementById('tabLogin').classList.toggle('active', tab==='login');
+  document.getElementById('tabRegister').classList.toggle('active', tab==='register');
+  document.getElementById('loginForm').classList.toggle('hidden', tab!=='login');
+  document.getElementById('registerForm').classList.toggle('hidden', tab!=='register');
+  document.getElementById('authError').classList.add('hidden');
+}
+function authFail(msg){
+  const el = document.getElementById('authError');
+  el.textContent = msg; el.classList.remove('hidden');
+}
+
+async function handleRegister(){
+  const u = document.getElementById('regUsername').value.trim();
+  const p = document.getElementById('regPassword').value;
+  const ref = document.getElementById('regReferrer').value.trim() || 'ALY';
+  if(!u || !p){ authFail('Enter a username and password.'); return; }
+  try {
+    await apiCall('/api/register', 'POST', { username:u, password:p, referrer:ref });
+    showToast('Account created — welcome, @'+u);
+    loginAs(u);
+  } catch(e) {
+    authFail(e.message);
+  }
+}
+
+async function handleLogin(){
+  const u = document.getElementById('loginUsername').value.trim();
+  const p = document.getElementById('loginPassword').value;
+  try {
+    const data = await apiCall('/api/login', 'POST', { username:u, password:p });
+    loginAs(u, data.user);
+  } catch(e) {
+    authFail(e.message);
+  }
+}
+
+function loginAs(username, userData){
+  currentUsername = username;
+  currentUser = userData;
+  document.getElementById('view-auth').classList.add('hidden');
+  document.getElementById('appRoot').classList.remove('hidden');
+  const isAdmin = (username === 'nexty');
+  document.getElementById('sbAdminLink').classList.toggle('hidden', !isAdmin);
+  document.getElementById('userBottomNav').classList.toggle('hidden', isAdmin);
+  if (!isAdmin) {
+    document.getElementById('welcomeHandle').textContent = '@'+username;
+    document.getElementById('welcomeRef').textContent = '@'+(userData.referrer || 'ALY');
+    document.getElementById('sbSignedInAs').textContent = '@'+username;
+    document.getElementById('referralLinkText').textContent = 'https://nextytrading.pk/register/'+username;
+    document.getElementById('referralLinkText2').textContent = 'https://nextytrading.pk/register/'+username;
+    renderStats();
+    switchView('home');
+  } else {
+    document.getElementById('sbSignedInAs').textContent = 'admin';
+    showToast('Logged in as admin');
+    switchView('admin');
+  }
+}
+
+function doLogout(){
+  currentUsername = null;
+  currentUser = null;
+  document.getElementById('appRoot').classList.add('hidden');
+  document.getElementById('view-auth').classList.remove('hidden');
+  document.getElementById('loginUsername').value='';
+  document.getElementById('loginPassword').value='';
+  switchAuthTab('login');
+  showToast('Logged out');
+}
+
+// ---------- View routing ----------
+async function switchView(view){
+  const viewMap = { home:'view-home', plans:'view-plans', withdraw:'view-withdraw', team:'view-team', admin:'view-admin' };
+  Object.values(viewMap).forEach(id => document.getElementById(id).classList.add('hidden'));
+  document.getElementById(viewMap[view]).classList.remove('hidden');
+  document.querySelectorAll('.nav-item').forEach(btn=> btn.classList.toggle('active', btn.dataset.view === view));
+  const titles = { home:['WORKSPACE','Dashboard'], plans:['INVEST','Plans'], withdraw:['CASH OUT','Withdraw'],
+    team:['NETWORK','Team'], admin:['CONTROL','Admin Panel'] };
+  document.getElementById('pageEyebrow').textContent = titles[view][0];
+  document.getElementById('pageTitle').textContent = titles[view][1];
+  if(view==='home') await refreshUserData();
+  if(view==='plans') await renderPlans();
+  if(view==='withdraw') await renderWithdrawHistory();
+  if(view==='team') await renderTeam();
+  if(view==='admin') await renderAdmin();
+}
+
+async function refreshUserData(){
+  if (!currentUsername || currentUsername==='nexty') return;
+  try {
+    const data = await apiCall('/api/user/'+currentUsername, 'GET');
+    currentUser = data;
+    renderStats();
+  } catch(e) {
+    showToast('Error refreshing data');
+  }
+}
+
+// ---------- Render functions ----------
+function renderStats(){
+  if (!currentUser || currentUsername==='nexty') return;
+  const u = currentUser;
+  document.getElementById('balHome').textContent = fmt(u.balance);
+  document.getElementById('statPendingDeposit').textContent = fmt(u.pendingDeposit);
+  document.getElementById('statPendingWithdraw').textContent = fmt(u.pendingWithdraw);
+  document.getElementById('statTotalInvestment').textContent = fmt(u.totalInvestment);
+  document.getElementById('statTotalWithdraw').textContent = fmt(u.totalWithdraw);
+  document.getElementById('statTotalProfit').textContent = fmt(u.totalProfit);
+  document.getElementById('statReferBonus').textContent = fmt(u.referBonus);
+  document.getElementById('statTeamMembers').textContent = u.teamMembers || 0;
+  document.getElementById('statTeamInvestment').textContent = fmt(u.teamInvestment || 0);
+  document.getElementById('balWithdrawView').textContent = fmt(u.balance);
+  document.getElementById('balWithdrawModal').textContent = fmt(u.balance);
+  document.getElementById('balInvestModal').textContent = fmt(u.balance);
+}
+
+// Plans (we need PLANS on client)
+const PLANS = [
+  { id:'p1', tag:'GROWTH PLAN 01', name:'NEXTY-01', amount:450,   dailyProfit:112,   days:75, totalProfit:8400 },
+  { id:'p2', tag:'GROWTH PLAN 02', name:'NEXTY-02', amount:1235,  dailyProfit:308,   days:75, totalProfit:23100 },
+  { id:'p3', tag:'GROWTH PLAN 03', name:'NEXTY-03', amount:2875,  dailyProfit:719,   days:75, totalProfit:53925 },
+  { id:'p4', tag:'GROWTH PLAN 04', name:'NEXTY-04', amount:6355,  dailyProfit:1588,  days:75, totalProfit:119100 },
+  { id:'p5', tag:'GROWTH PLAN 05', name:'NEXTY-05', amount:12755, dailyProfit:3188,  days:75, totalProfit:239100 },
+  { id:'p6', tag:'GROWTH PLAN 06', name:'NEXTY-06', amount:27750, dailyProfit:6937,  days:75, totalProfit:520275 },
+  { id:'p7', tag:'GROWTH PLAN 07', name:'NEXTY-07', amount:57750, dailyProfit:14437, days:75, totalProfit:1082775 }
+];
+const DAY_MS = 24*60*60*1000;
+
+async function renderPlans(){
+  if (!currentUser) await refreshUserData();
+  const u = currentUser;
+  const activeWrap = document.getElementById('activeInvestments');
+  const listWrap = document.getElementById('plansList');
+
+  activeWrap.innerHTML = (u.investments || []).map(inv => {
+    const plan = PLANS.find(p=>p.id===inv.plan);
+    if (!plan) return '';
+    const daysCredited = inv.daysCredited || 0;
+    const pct = Math.min(100, (daysCredited/inv.days)*100);
+    const remaining = daysCredited >= inv.days ? 'Completed' : 'Next payout in ~' + Math.ceil((DAY_MS - (Date.now()-inv.startTime)%DAY_MS)/(60*60*1000)) + 'h';
+    return `<div class="active-inv">
+      <div class="row"><span>${plan.name}</span><b>Rs${fmt(inv.amount)} invested</b></div>
+      <div class="row"><span>Daily profit</span><b>Rs${fmt(plan.dailyProfit)}</b></div>
+      <div class="row"><span>Days paid</span><b>${daysCredited} / ${inv.days}</b></div>
+      <div class="row"><span>Profit earned</span><b style="color:#3be0a2">Rs${fmt(inv.accrued)}</b></div>
+      <div class="row"><span>${remaining}</span></div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join('');
+
+  // Render plan cards
+  listWrap.innerHTML = PLANS.map(p => `
+    <div class="plan-hero-card">
+      <div class="plan-hero-top">
+        <div class="plan-art"><div class="tag">${p.tag}</div><svg viewBox="0 0 140 140"><rect x="14" y="90" width="18" height="35" rx="3" fill="rgba(255,255,255,0.28)"/><rect x="40" y="70" width="18" height="55" rx="3" fill="rgba(255,255,255,0.32)"/><rect x="66" y="50" width="18" height="75" rx="3" fill="rgba(255,255,255,0.4)"/><rect x="92" y="35" width="18" height="90" rx="3" fill="rgba(255,255,255,0.48)"/><circle cx="100" cy="118" r="18" fill="rgba(255,255,255,0.9)"/><text x="100" y="123" font-size="13" font-weight="800" fill="#1a6fd8" text-anchor="middle">Rs</text></svg></div>
+        <div class="plan-hero-right">
+          <div class="plan-hero-name">${p.name}</div>
+          <div class="plan-hero-label">PLAN AMOUNT</div>
+          <div class="plan-hero-amount">Rs${fmt(p.amount)}</div>
+          <div class="plan-active-pill"><span class="pip"></span> ACTIVE PLAN</div>
+        </div>
+      </div>
+      <div class="plan-hero-stats">
+        <div class="plan-stat"><div class="plan-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15 2 2 4-4"/></svg></div><div class="k">DAILY PROFIT</div><div class="v">Rs${fmt(p.dailyProfit)}</div></div>
+        <div class="plan-stat divider"><div class="plan-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div><div class="k">DURATION</div><div class="v">${p.days}<small>Days</small></div></div>
+        <div class="plan-stat divider"><div class="plan-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M3 10h18"/></svg></div><div class="k">TOTAL PROFIT</div><div class="v">Rs${fmt(p.totalProfit)}</div></div>
+        <div class="plan-stat divider"><div class="plan-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/></svg></div><div class="k">REFER BONUS</div><div class="v" style="font-size:12px;">L1: ${REFER_L1}%<br>L2: ${REFER_L2}%</div></div>
+      </div>
+      <div class="plan-hero-cta">
+        <button class="plan-invest-btn" onclick="openInvestModal('${p.id}')">INVEST NOW</button>
+      </div>
+      <div class="plan-hero-note">🛡 Secure investment · Daily profit credit</div>
+    </div>
+  `).join('');
+}
+
+// Withdraw history
+async function renderWithdrawHistory(){
+  if (!currentUser) await refreshUserData();
+  const u = currentUser;
+  const list = (u.transactions || []).slice().reverse();
+  const el = document.getElementById('withdrawHistoryList');
+  if(list.length===0){ el.innerHTML = '<div class="empty-state">No activity yet.</div>'; return; }
+  el.innerHTML = list.map(tx=>{
+    const isDeposit = tx.type==='deposit';
+    const sign = isDeposit ? '+' : '−';
+    const statusClass = tx.status==='pending' ? 'status-pending' : (tx.status==='rejected' ? 'status-rejected' : 'status-approved');
+    const label = tx.status==='pending' ? 'Pending' : (tx.status==='rejected' ? 'Rejected' : 'Approved');
+    return `<div class="tx-item">
+      <div class="tx-icon" style="background:${isDeposit?'rgba(47,211,154,0.15)':'rgba(63,162,255,0.15)'}"><svg viewBox="0 0 24 24" fill="none" stroke="${isDeposit?'#3be0a2':'#7db8ff'}" stroke-width="2.2">${isDeposit?'<path d="M12 5v14M5 12l7 7 7-7"/>':'<path d="M12 19V5M5 12l7-7 7 7"/>'}</svg></div>
+      <div class="tx-meta"><div class="t">${isDeposit?'Deposit':'Withdraw'}</div><div class="d">${tx.date}</div></div>
+      <div><div class="tx-amt">${sign} Rs${fmt(tx.amount)}</div><div class="tx-status ${statusClass}">${label}</div></div>
+    </div>`;
+  }).join('');
+}
+
+// Team
+async function renderTeam(){
+  if (!currentUser) await refreshUserData();
+  const u = currentUser;
+  const el = document.getElementById('teamList');
+  const referrals = u.referrals || [];
+  if(referrals.length===0){
+    el.innerHTML = '<div class="empty-state">No referrals yet. Share your link.</div>';
+    return;
+  }
+  el.innerHTML = `<div class="section-head" style="padding-top:0;"><h2 style="font-size:17px;">Team members (${referrals.length})</h2></div>
+    ${referrals.map(ref => `<div class="team-member"><div class="tm-avatar">${ref[0].toUpperCase()}</div><div class="tm-meta"><div class="t">@${ref}</div><div class="d">Referred via your link</div></div><div class="tm-amt">● active</div></div>`).join('')}`;
+}
+
+// ---------- Modals ----------
+function openModal(type){ document.getElementById(type+'Modal').classList.add('show'); renderStats(); }
+function closeModal(type){ document.getElementById(type+'Modal').classList.remove('show'); }
+function openInvestModal(planId){
+  currentInvestPlan = PLANS.find(p=>p.id===planId);
+  const p = currentInvestPlan;
+  document.getElementById('investPlanTitle').textContent = 'Invest — '+p.name;
+  document.getElementById('investAmountDisplay').textContent = 'Rs'+fmt(p.amount);
+  document.getElementById('investDailyDisplay').textContent = 'Rs'+fmt(p.dailyProfit);
+  document.getElementById('investDaysDisplay').textContent = p.days+' Days';
+  document.getElementById('investTotalDisplay').textContent = 'Rs'+fmt(p.totalProfit);
+  document.getElementById('investHint').textContent = 'This will deduct the plan amount from your balance and start daily profit.';
+  openModal('invest');
+}
+
+// ---------- User actions ----------
+async function submitDeposit(){
+  const amtInput = document.getElementById('depositAmount');
+  const txidInput = document.getElementById('depositTxid');
+  const amount = parseFloat(amtInput.value);
+  if(!amount || amount<=0){ showToast('Enter a valid amount'); return; }
+  try {
+    await apiCall('/api/deposit', 'POST', { username: currentUsername, amount, txid: txidInput.value });
+    showToast(`Deposit of Rs${fmt(amount)} submitted – waiting for admin approval`);
+    amtInput.value=''; txidInput.value='';
+    closeModal('deposit');
+    await refreshUserData();
+  } catch(e) { showToast(e.message); }
+}
+
+async function submitWithdraw(amountId, accountId, fromModal){
+  const amtInput = document.getElementById(amountId);
+  const accInput = document.getElementById(accountId);
+  const amount = parseFloat(amtInput.value);
+  if(!amount || amount<=0){ showToast('Enter a valid amount'); return; }
+  if(amount > currentUser.balance){ showToast('Insufficient balance'); return; }
+  if(!accInput.value.trim()){ showToast('Enter EasyPaisa number'); return; }
+  try {
+    await apiCall('/api/withdraw', 'POST', { username: currentUsername, amount, account: accInput.value.trim() });
+    showToast(`Withdraw request of Rs${fmt(amount)} sent to admin`);
+    amtInput.value=''; accInput.value='';
+    if(fromModal) closeModal('withdraw');
+    await refreshUserData();
+    await renderWithdrawHistory();
+  } catch(e) { showToast(e.message); }
+}
+
+async function submitInvest(){
+  if(!currentInvestPlan) return;
+  const plan = currentInvestPlan;
+  if(plan.amount > currentUser.balance){ showToast('Insufficient balance – deposit funds first'); return; }
+  try {
+    await apiCall('/api/invest', 'POST', { username: currentUsername, planId: plan.id });
+    showToast(`Rs${fmt(plan.amount)} invested in ${plan.name}`);
+    closeModal('invest');
+    await refreshUserData();
+    await renderPlans();
+  } catch(e) { showToast(e.message); }
+}
+
+// ---------- Admin ----------
+function switchAdminTab(tab){
+  currentAdminTab = tab;
+  document.getElementById('adminTabDeposits').classList.toggle('active', tab==='deposits');
+  document.getElementById('adminTabWithdrawals').classList.toggle('active', tab==='withdrawals');
+  renderAdmin();
+}
+
+async function renderAdmin(){
+  const type = currentAdminTab === 'deposits' ? 'deposit' : 'withdraw';
+  try {
+    const pending = await apiCall('/api/admin/pending/' + type, 'GET');
+    const el = document.getElementById('adminRequestsList');
+    if(pending.length === 0) {
+      el.innerHTML = '<div class="empty-state">No pending requests.</div>';
+      return;
+    }
+    el.innerHTML = pending.map(tx => `
+      <div class="admin-req-card">
+        <div class="admin-req-top">
+          <div class="who">@${tx.username}</div>
+          <div class="type-badge ${tx.type === 'deposit' ? 'type-deposit' : 'type-withdraw'}">${tx.type.toUpperCase()}</div>
+        </div>
+        <div class="admin-req-mid">${tx.method} · ${tx.date}</div>
+        <div class="admin-req-amt">Rs${fmt(tx.amount)}</div>
+        <div class="admin-actions">
+          <button class="btn-approve" onclick="adminApprove('${tx.id}')">Approve</button>
+          <button class="btn-reject" onclick="adminReject('${tx.id}')">Reject</button>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    showToast('Error loading admin requests');
+  }
+}
+async function adminApprove(txId){
+  try {
+    await apiCall('/api/admin/approve', 'POST', { txId });
+    showToast('Approved');
+    renderAdmin();
+    if(currentUsername !== 'nexty') await refreshUserData();
+  } catch(e) { showToast(e.message); }
+}
+
+async function adminReject(txId){
+  try {
+    await apiCall('/api/admin/reject', 'POST', { txId });
+    showToast('Rejected');
+    renderAdmin();
+    if(currentUsername !== 'nexty') await refreshUserData();
+  } catch(e) { showToast(e.message); }
+}
 </script>
 </body>
 </html>
